@@ -55,6 +55,24 @@ class LivenessCheckConfig {
   /// AppBar configuration.
   final AppBarConfig appBarConfig;
 
+  /// Enable head movement detection (look left, right, up, down)
+  final bool enableHeadMovementDetection;
+  
+  /// Required head movements to complete (e.g., [HeadMovement.left, HeadMovement.right])
+  final List<HeadMovement> requiredHeadMovements;
+  
+  /// Threshold for detecting left/right head movement (Euler Y angle in degrees)
+  final double headMovementYawThreshold;
+  
+  /// Threshold for detecting up/down head movement (Euler X angle in degrees)
+  final double headMovementPitchThreshold;
+  
+  /// Minimum frames to confirm head movement
+  final int headMovementMinFrames;
+  
+  /// Maximum frames to hold position (prevents false positives)
+  final int headMovementMaxFrames;
+
   /// Creates a liveness check configuration.
   const LivenessCheckConfig({
     this.cameraSettings = const CameraSettings(),
@@ -69,6 +87,13 @@ class LivenessCheckConfig {
     this.customLoadingWidget,
     this.customCameraLoadingWidget,
     this.appBarConfig = const AppBarConfig(),
+    this.enableHeadMovementDetection = false,
+    this.requiredHeadMovements = const [HeadMovement.left, HeadMovement.right,HeadMovement.up, HeadMovement.down],
+    this.headMovementYawThreshold = 20.0,
+    this.headMovementPitchThreshold = 15.0,
+    this.headMovementMinFrames = 5,
+    this.headMovementMaxFrames = 30,
+
   });
 }
 
@@ -154,6 +179,15 @@ class AppBarConfig {
     this.automaticallyImplyLeading = true,
     this.showBackButton = true,
   });
+}
+
+/// Enum for head movement directions
+enum HeadMovement {
+  left,
+  right,
+  up,
+  down,
+  none,
 }
 
 /// Theme configuration for visual customization of the liveness check screen.
@@ -429,6 +463,13 @@ class LivenessCheckMessages {
   /// Configuration for the permission dialog.
   final PermissionDialogConfig permissionDialogConfig;
 
+  final String lookLeftInstruction;
+  final String lookRightInstruction;
+  final String lookUpInstruction;
+  final String lookDownInstruction;
+  final String headMovementDetected;
+
+
   /// Creates liveness check messages.
   const LivenessCheckMessages({
     this.title = 'Liveness Check',
@@ -451,6 +492,12 @@ class LivenessCheckMessages {
     this.spoofingDetected = 'Spoofing detected. Please use a real face.',
     this.tryAgainButtonText = 'Try Again',
     this.permissionDialogConfig = const PermissionDialogConfig(),
+    this.lookLeftInstruction = 'Please look left',
+    this.lookRightInstruction = 'Please look right',
+    this.lookUpInstruction = 'Please look up',
+    this.lookDownInstruction = 'Please look down',
+    this.headMovementDetected = 'Movement detected!',
+
   });
 }
 

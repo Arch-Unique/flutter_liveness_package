@@ -113,6 +113,21 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
   /// Current retry attempt count
   int _retryAttemptCount = 0;
 
+  /// List of completed head movements
+  List<HeadMovement> _completedHeadMovements = [];
+  
+  /// Current head movement being detected
+  HeadMovement _currentHeadMovement = HeadMovement.none;
+  
+  /// Tracks if head movement detection is in progress
+  bool _isHeadMovementInProgress = false;
+  
+  /// Number of consecutive frames with detected head movement
+  int _framesWithHeadMovement = 0;
+  
+  /// Current head movement instruction to show user
+  HeadMovement? _currentInstruction;
+
   late FaceAntiSpoofingOnnx antiSpoofingService;
 
   @override
@@ -135,6 +150,12 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
       _initializeCamera();
       _initializeFaceDetector();
       _initServices();
+    }
+
+    // Initialize head movement instruction
+    if (widget.config.settings.enableHeadMovementDetection &&
+        widget.config.settings.requiredHeadMovements.isNotEmpty) {
+      _currentInstruction = widget.config.settings.requiredHeadMovements.first;
     }
   }
 
@@ -225,20 +246,15 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
   }
 
   void _onTryAgain() {
-    // Increment retry counter
     _retryAttemptCount++;
 
-    // Check if max retry attempts reached
     if (_retryAttemptCount >= widget.config.settings.maxRetryAttempts) {
-      // Call max retry reached callback
       widget.config.callbacks?.onMaxRetryReached?.call(_retryAttemptCount);
       return;
     }
 
-    // Call the onTryAgain callback
     widget.config.callbacks?.onTryAgain?.call();
 
-    // Reset internal state
     setState(() {
       _isProcessing = false;
       _livenessCompleted = false;
@@ -247,6 +263,15 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
       _framesWithEyesClosed = 0;
       _poorQualityFrames = 0;
       _borderColor = widget.config.theme.borderColor;
+      
+      // Reset head movement state
+      _completedHeadMovements.clear();
+      _isHeadMovementInProgress = false;
+      _framesWithHeadMovement = 0;
+      if (widget.config.settings.enableHeadMovementDetection &&
+          widget.config.settings.requiredHeadMovements.isNotEmpty) {
+        _currentInstruction = widget.config.settings.requiredHeadMovements.first;
+      }
     });
 
     // Reinitialize camera and face detector
@@ -511,6 +536,134 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
     }
   }
 
+  /// Detects head movements (left, right, up, down) for liveness verification.
+  ///
+  /// This method analyzes head pose angles to detect directional movements:
+  /// - Uses Euler Y angle for left/right detection
+  /// - Uses Euler X angle for up/down detection
+  /// - Requires sustained movement for multiple frames to avoid false positives
+  /// - Prevents holding position too long (max frames threshold)
+  ///
+  /// [face] The detected face containing head pose angles
+  void _checkHeadMovement(Face face) {
+    if (!widget.config.settings.enableHeadMovementDetection) return;
+    
+    // Skip if all required movements are completed
+    if (_completedHeadMovements.length >= 
+        widget.config.settings.requiredHeadMovements.length) {
+      return;
+    }
+    
+    // Get current instruction (next required movement)
+    _currentInstruction = widget.config.settings.requiredHeadMovements
+        .firstWhere(
+          (movement) => !_completedHeadMovements.contains(movement),
+          orElse: () => HeadMovement.none,
+        );
+    
+    if (_currentInstruction == HeadMovement.none) return;
+    
+    final headYaw = face.headEulerAngleY ?? 0.0;
+    final headPitch = face.headEulerAngleX ?? 0.0;
+    
+    HeadMovement detectedMovement = HeadMovement.none;
+    
+    // Detect head movement based on Euler angles
+    switch (_currentInstruction!) {
+      case HeadMovement.left:
+        // Positive yaw = turn right, Negative yaw = turn left
+        if (headYaw < -widget.config.settings.headMovementYawThreshold) {
+          detectedMovement = HeadMovement.left;
+        }
+        break;
+        
+      case HeadMovement.right:
+        if (headYaw > widget.config.settings.headMovementYawThreshold) {
+          detectedMovement = HeadMovement.right;
+        }
+        break;
+        
+      case HeadMovement.up:
+        // Negative pitch = look up
+        if (headPitch < -widget.config.settings.headMovementPitchThreshold) {
+          detectedMovement = HeadMovement.up;
+        }
+        break;
+        
+      case HeadMovement.down:
+        // Positive pitch = look down
+        if (headPitch > widget.config.settings.headMovementPitchThreshold) {
+          detectedMovement = HeadMovement.down;
+        }
+        break;
+        
+      case HeadMovement.none:
+        break;
+    }
+    
+    // Check if detected movement matches current instruction
+    if (detectedMovement == _currentInstruction && !_isHeadMovementInProgress) {
+      // Start tracking movement
+      _isHeadMovementInProgress = true;
+      _currentHeadMovement = detectedMovement;
+      _framesWithHeadMovement = 1;
+      
+      debugPrint(
+        '[HeadMovement] Started tracking ${detectedMovement.name} '
+        '(yaw: ${headYaw.toStringAsFixed(1)}°, pitch: ${headPitch.toStringAsFixed(1)}°)',
+      );
+    } else if (detectedMovement == _currentInstruction && _isHeadMovementInProgress) {
+      // Continue tracking movement
+      _framesWithHeadMovement++;
+      
+      // Check if held too long (might be a photo)
+      if (_framesWithHeadMovement > widget.config.settings.headMovementMaxFrames) {
+        debugPrint(
+          '[HeadMovement] Held too long (${_framesWithHeadMovement} frames), resetting',
+        );
+        _isHeadMovementInProgress = false;
+        _framesWithHeadMovement = 0;
+        return;
+      }
+      
+      // Check if movement is confirmed (held for minimum frames)
+      if (_framesWithHeadMovement >= widget.config.settings.headMovementMinFrames) {
+        debugPrint(
+          '[HeadMovement] ${detectedMovement.name} confirmed! '
+          '(${_framesWithHeadMovement} frames)',
+        );
+        
+        // Add to completed movements
+        setState(() {
+          _completedHeadMovements.add(detectedMovement);
+          _isHeadMovementInProgress = false;
+          _framesWithHeadMovement = 0;
+          _errorMessage = widget.config.messages.headMovementDetected;
+          _borderColor = Colors.green;
+        });
+        
+        // Brief success feedback
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) {
+            setState(() {
+              _errorMessage = '';
+              _borderColor = widget.config.theme.borderColor;
+            });
+          }
+        });
+      }
+    } else if (detectedMovement == HeadMovement.none && _isHeadMovementInProgress) {
+      // Movement stopped before confirmation
+      if (_framesWithHeadMovement < widget.config.settings.headMovementMinFrames) {
+        debugPrint(
+          '[HeadMovement] Movement stopped too early (${_framesWithHeadMovement} frames)',
+        );
+      }
+      _isHeadMovementInProgress = false;
+      _framesWithHeadMovement = 0;
+    }
+  }
+
   /// Detects faces in the input image and performs quality checks.
   ///
   /// This method:
@@ -624,6 +777,11 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
   ///
   /// [face] The detected face from ML Kit containing landmarks and probabilities
   void _processSingleFace(Face face) {
+    // Check head movement first (if enabled)
+    if (widget.config.settings.enableHeadMovementDetection) {
+      _checkHeadMovement(face);
+    }
+    
     // Check eye blink if enabled
     if (widget.config.settings.enableBlinkDetection) {
       _checkEyeBlink(face);
@@ -1362,21 +1520,65 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
     // Check if smile requirement is met (only if enabled)
     bool smileCheckPassed =
         widget.config.settings.enableSmileDetection && _isSmiling;
+    
+    // Check if head movement requirement is met (only if enabled)
+    bool headMovementCheckPassed = widget.config.settings.enableHeadMovementDetection &&
+        _completedHeadMovements.length >= 
+        widget.config.settings.requiredHeadMovements.length;
 
-    // Pass if ANY enabled check succeeds (OR logic, same as before)
-    // If both are disabled, pass immediately
-    bool livenessCheckPassed = (!widget.config.settings.enableBlinkDetection &&
-            !widget.config.settings.enableSmileDetection) ||
-        blinkCheckPassed ||
-        smileCheckPassed;
+    // Pass if ALL enabled checks succeed
+    bool livenessCheckPassed = true;
+    
+    // Only check enabled features
+    if (widget.config.settings.enableBlinkDetection && !blinkCheckPassed) {
+      livenessCheckPassed = false;
+    }
+    if (widget.config.settings.enableSmileDetection && !smileCheckPassed) {
+      livenessCheckPassed = false;
+    }
+    if (widget.config.settings.enableHeadMovementDetection && !headMovementCheckPassed) {
+      livenessCheckPassed = false;
+    }
+    
+    // If no checks are enabled, pass immediately
+    if (!widget.config.settings.enableBlinkDetection &&
+        !widget.config.settings.enableSmileDetection &&
+        !widget.config.settings.enableHeadMovementDetection) {
+      livenessCheckPassed = true;
+    }
 
     if (livenessCheckPassed && !_livenessCompleted) {
       _completeLivenessCheck();
     } else if (!_livenessCompleted) {
-      setState(() {
-        _errorMessage = "";
-        _borderColor = widget.config.theme.borderColor;
-      });
+      // Show current instruction for head movement
+      if (widget.config.settings.enableHeadMovementDetection && 
+          _currentInstruction != null &&
+          _errorMessage.isEmpty) {
+        setState(() {
+          _errorMessage = _getHeadMovementInstruction(_currentInstruction!);
+          _borderColor = widget.config.theme.borderColor;
+        });
+      } else {
+        setState(() {
+          _errorMessage = "";
+          _borderColor = widget.config.theme.borderColor;
+        });
+      }
+    }
+  }
+
+    String _getHeadMovementInstruction(HeadMovement movement) {
+    switch (movement) {
+      case HeadMovement.left:
+        return widget.config.messages.lookLeftInstruction;
+      case HeadMovement.right:
+        return widget.config.messages.lookRightInstruction;
+      case HeadMovement.up:
+        return widget.config.messages.lookUpInstruction;
+      case HeadMovement.down:
+        return widget.config.messages.lookDownInstruction;
+      case HeadMovement.none:
+        return '';
     }
   }
 
@@ -1510,6 +1712,15 @@ class _LivenessCheckScreenState extends State<LivenessCheckScreen> {
       _isBlinkInProgress = false;
       _framesWithEyesClosed = 0;
       _poorQualityFrames = 0;
+      
+      // Reset head movement tracking
+      _completedHeadMovements.clear();
+      _isHeadMovementInProgress = false;
+      _framesWithHeadMovement = 0;
+      if (widget.config.settings.enableHeadMovementDetection &&
+          widget.config.settings.requiredHeadMovements.isNotEmpty) {
+        _currentInstruction = widget.config.settings.requiredHeadMovements.first;
+      }
     });
   }
 
